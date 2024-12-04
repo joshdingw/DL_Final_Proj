@@ -1,7 +1,8 @@
 from dataset import create_wall_dataloader
 from evaluator import ProbingEvaluator
 import torch
-from models import MockModel
+#from models import MockModel
+from models import JEPAModel
 import glob
 
 
@@ -44,7 +45,14 @@ def load_data(device):
 def load_model():
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
-    model = MockModel()
+    #model = MockModel()
+    model = JEPAModel(device=device)
+    model.to(device)
+    try:
+        model.load_state_dict(torch.load('jepa_model.pth'))
+        print("Loaded saved JEPA model.")
+    except FileNotFoundError:
+        print("No saved model found, initializing a new model.")
     return model
 
 
@@ -64,9 +72,82 @@ def evaluate_model(device, model, probe_train_ds, probe_val_ds):
     for probe_attr, loss in avg_losses.items():
         print(f"{probe_attr} loss: {loss}")
 
+def je_loss(predictions, targets):
+    # Normalize the representations
+    predictions = F.normalize(predictions, dim=-1)
+    targets = F.normalize(targets, dim=-1)
+
+    # Compute MSE loss
+    loss = F.mse_loss(predictions, targets)
+    return loss
+
+
+def train_model(device):
+    # Load training data
+    train_loader = create_wall_dataloader(
+        data_path="/scratch/DL24FA/train",
+        probing=False,
+        device=device,
+        train=True,
+    )
+
+    model = JEPAModel(device=device)
+    model.to(device)
+
+    optimizer = torch.optim.Adam(
+        list(model.encoder.parameters()) + list(model.predictor.parameters()),
+        lr=1e-3
+    )
+
+    num_epochs = 10
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
+            states = batch.states  # [B, T, C, H, W]
+            actions = batch.actions  # [B, T-1, action_dim]
+
+            optimizer.zero_grad()
+            predictions, targets = model(states, actions)
+            loss = je_loss(predictions, targets)
+            loss.backward()
+            optimizer.step()
+
+            # Update target encoder
+            model.update_target_encoder()
+
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(train_loader)
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
+
+        # Optionally evaluate the model
+        if (epoch + 1) % 2 == 0:
+            evaluate_current_model(model, device)
+
+def evaluate_current_model(model, device):
+    # Load evaluation datasets
+    probe_train_ds, probe_val_ds = load_data(device)
+    evaluator = ProbingEvaluator(
+        device=device,
+        model=model,
+        probe_train_ds=probe_train_ds,
+        probe_val_ds=probe_val_ds,
+        quick_debug=False,
+    )
+
+    prober = evaluator.train_pred_prober()
+    avg_losses = evaluator.evaluate_all(prober=prober)
+    for probe_attr, loss in avg_losses.items():
+        print(f"{probe_attr} loss: {loss}")
+
+    # Save the trained model
+    torch.save(model.state_dict(), 'jepa_model.pth')
 
 if __name__ == "__main__":
     device = get_device()
+    train_model(device)
+    
     probe_train_ds, probe_val_ds = load_data(device)
     model = load_model()
     evaluate_model(device, model, probe_train_ds, probe_val_ds)
