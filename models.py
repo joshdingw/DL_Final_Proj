@@ -3,6 +3,7 @@ import numpy as np
 from torch import nn
 from torch.nn import functional as F
 import torch
+import torch.nn.functional as F
 
 
 def build_mlp(layers_dims: List[int]):
@@ -71,16 +72,17 @@ class Encoder(nn.Module):
     def __init__(self, repr_dim=256):
         super().__init__()
         self.conv_net = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=2, padding=1),  # Assuming RGB images
+            nn.Conv2d(2, 32, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(128 * 4 * 4, repr_dim),  # Adjust input dims accordingly
+            nn.Linear(128 * 9 * 9, repr_dim),  # Adjusted in_features to 128 * 9 * 9 = 10368
             nn.ReLU()
         )
+
 
     def forward(self, x):
         return self.conv_net(x)

@@ -4,7 +4,7 @@ import torch
 #from models import MockModel
 from models import JEPAModel
 import glob
-
+from tqdm import tqdm
 
 def get_device():
     """Check for GPU availability."""
@@ -103,14 +103,34 @@ def train_model(device):
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
-        for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch+1}")):
             states = batch.states  # [B, T, C, H, W]
             actions = batch.actions  # [B, T-1, action_dim]
 
+            # Debugging statements
+            if batch_idx == 0 and epoch == 0:
+                print(f"States shape: {states.shape}, Actions shape: {actions.shape}")
+                print(f"States min: {states.min()}, max: {states.max()}")
+                print(f"Actions min: {actions.min()}, max: {actions.max()}")
+
             optimizer.zero_grad()
             predictions, targets = model(states, actions)
+
+            # Additional debugging
+            print(f"Predictions shape: {predictions.shape}, Targets shape: {targets.shape}")
+            print(f"Predictions min: {predictions.min()}, max: {predictions.max()}")
+            print(f"Targets min: {targets.min()}, max: {targets.max()}")
+
             loss = je_loss(predictions, targets)
             loss.backward()
+
+            # Check gradient norms
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    print(f"{name}: grad norm = {param.grad.norm()}")
+                else:
+                    print(f"{name} has no gradient")
+
             optimizer.step()
 
             # Update target encoder
@@ -118,12 +138,19 @@ def train_model(device):
 
             total_loss += loss.item()
 
+            # Print loss every 100 batches
+            if batch_idx % 100 == 0:
+                print(f"Batch {batch_idx}, Loss: {loss.item():.8f}")
+
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.8f}")
 
         # Optionally evaluate the model
         if (epoch + 1) % 2 == 0:
             evaluate_current_model(model, device)
+
+    # Save the trained model
+    torch.save(model.state_dict(), 'jepa_model.pth')
 
 def evaluate_current_model(model, device):
     # Load evaluation datasets
