@@ -72,11 +72,9 @@ def evaluate_model(device, model, probe_train_ds, probe_val_ds):
         print(f"{probe_attr} loss: {loss}")
 
 def je_loss(predictions, targets):
-    # Normalize the representations
     #predictions = F.normalize(predictions, dim=-1)
     #targets = F.normalize(targets, dim=-1)
-
-    # Compute MSE loss
+    
     #loss = F.mse_loss(predictions, targets)
     loss = 1 - F.cosine_similarity(predictions, targets, dim=-1).mean()
     return loss
@@ -143,7 +141,6 @@ def train_model(device):
 
 
 def evaluate_current_model(model, device):
-    # Load evaluation datasets
     probe_train_ds, probe_val_ds = load_data(device)
     evaluator = ProbingEvaluator(
         device=device,

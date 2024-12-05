@@ -81,7 +81,6 @@ class Encoder(nn.Module):
             nn.ReLU(),
         )
 
-        # Dynamically compute the input size for the linear layer
         with torch.no_grad():
             sample_input = torch.zeros(1, input_channels, *input_size)
             conv_output = self.conv_net(sample_input)
@@ -198,7 +197,7 @@ class JEPAModel(nn.Module):
 
         predicted_reprs = []
 
-        # Get representation of initial state
+        #initial state
         current_repr = self.encoder(init_states[:, 0])  # [B, D]
         predicted_reprs.append(current_repr.unsqueeze(0))  # [1, B, D]
 
