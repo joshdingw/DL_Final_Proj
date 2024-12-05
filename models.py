@@ -68,6 +68,7 @@ class Prober(torch.nn.Module):
         output = self.prober(e)
         return output
 
+
 class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256):
         super().__init__()
@@ -98,7 +99,6 @@ class Encoder(nn.Module):
         return x
 
 
-
 class Predictor(nn.Module):
     def __init__(self, repr_dim=256, action_dim=2):
         super().__init__()
@@ -111,7 +111,6 @@ class Predictor(nn.Module):
     def forward(self, repr, action):
         x = torch.cat([repr, action], dim=-1)
         return self.mlp(x)
-
 
 class JEPAModel(nn.Module):
     def __init__(self, device="cuda", repr_dim=256, action_dim=2, momentum=0.999):
@@ -157,6 +156,7 @@ class JEPAModel(nn.Module):
 
             # Initial state representation
             current_repr = state_reprs[:, 0]  # [B, D]
+
             predictions.append(current_repr.unsqueeze(1))  # [B, 1, D]
 
             for t in range(T - 1):
@@ -180,3 +180,35 @@ class JEPAModel(nn.Module):
         predictions = torch.cat(predictions, dim=1)  # [B, T, D]
 
         return predictions
+
+    def predict_future(self, init_states, actions):
+        """
+        Unroll the model to predict future representations.
+
+        Args:
+            init_states: [B, 1, Ch, H, W]
+            actions: [B, T-1, 2]
+
+        Returns:
+            predicted_reprs: [T, B, D]
+        """
+        B, _, C, H, W = init_states.shape
+        T_minus1 = actions.shape[1]
+        T = T_minus1 + 1
+
+        predicted_reprs = []
+
+        # Get representation of initial state
+        current_repr = self.encoder(init_states[:, 0])  # [B, D]
+        predicted_reprs.append(current_repr.unsqueeze(0))  # [1, B, D]
+
+        for t in range(T_minus1):
+            action = actions[:, t]  # [B, action_dim]
+            # Predict next representation
+            pred_repr = self.predictor(current_repr, action)  # [B, D]
+            predicted_reprs.append(pred_repr.unsqueeze(0))  # [1, B, D]
+            # Update current representation for next step
+            current_repr = pred_repr
+
+        predicted_reprs = torch.cat(predicted_reprs, dim=0)  # [T, B, D]
+        return predicted_reprs
