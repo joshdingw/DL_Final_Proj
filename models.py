@@ -111,6 +111,7 @@ class Predictor(nn.Module):
         x = torch.cat([repr, action], dim=-1)
         return self.mlp(x)
 
+
 class JEPAModel(nn.Module):
     def __init__(self, device="cuda", repr_dim=256, action_dim=2, momentum=0.99):
         super().__init__()
