@@ -72,34 +72,51 @@ def evaluate_model(device, model, probe_train_ds, probe_val_ds):
         print(f"{probe_attr} loss: {loss}")
 
 def je_loss(predictions, targets):
-    # Normalize embeddings to unit sphere
-    predictions = F.normalize(predictions, dim=-1, p=2)
+    # Input shapes: [B, T, D]
+    
+    # Normalize embeddings to unit sphere (crucial!)
+    predictions = F.normalize(predictions, dim=-1, p=2)  
     targets = F.normalize(targets, dim=-1, p=2)
     
-    # Simple cosine similarity loss to start
-    cos_sim = (predictions * targets).sum(dim=-1)
-    loss = (1 - cos_sim).mean()
+    # Simple contrastive loss that encourages similar embeddings for same timesteps
+    pos_cos_sim = (predictions * targets).sum(dim=-1)  # [B, T]
     
-    return loss
+    # Scale up loss for better gradients
+    loss = 2 * (1 - pos_cos_sim).mean()
+    
+    # Add regularization to prevent representation collapse
+    pred_std = predictions.std(dim=1).mean()
+    target_std = targets.std(dim=1).mean()
+    
+    std_reg = 0.1 * (torch.abs(1 - pred_std) + torch.abs(1 - target_std))
+    
+    return loss + std_reg
 
 def train_model(device):
     train_loader = create_wall_dataloader(
         data_path="/scratch/DL24FA/train",
-        probing=False,
+        probing=False, 
         device=device,
         train=True,
     )
 
-    model = JEPAModel(device=device, momentum=0.99)
+    model = JEPAModel(device=device, momentum=0.996)
     model.to(device)
 
-    # Fixed learning rate without warmup
-    optimizer = torch.optim.AdamW(
-        list(model.encoder.parameters()) + list(model.predictor.parameters()),
-        lr=1e-4,  # Start with small learning rate
-        weight_decay=0.01
-    )
+    # Initialize encoder randomly
+    def init_weights(m):
+        if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
     
+    model.apply(init_weights)
+
+    optimizer = torch.optim.AdamW([
+        {'params': model.encoder.parameters(), 'lr': 3e-4},
+        {'params': model.predictor.parameters(), 'lr': 1e-3}
+    ], weight_decay=0.01)
+
     num_epochs = 10
     for epoch in range(num_epochs):
         model.train()
@@ -108,37 +125,44 @@ def train_model(device):
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch+1}")):
             states = batch.states
             actions = batch.actions
-            
+
+            # Zero gradients
             optimizer.zero_grad()
 
-            predictions = model(states, actions)
-            with torch.no_grad():
-                targets = model.target_encoder(
-                    states.view(-1, *states.shape[2:])
-                ).view(states.size(0), states.size(1), -1)
-                targets = targets.detach()
+            # Forward pass
+            with torch.cuda.amp.autocast():  # Mixed precision
+                predictions = model(states, actions)
+                with torch.no_grad():
+                    targets = model.target_encoder(
+                        states.view(-1, *states.shape[2:])
+                    ).view(states.size(0), states.size(1), -1)
+                    targets = targets.detach()
 
-            # Only predict future states
-            loss = je_loss(predictions[:, 1:], targets[:, 1:])
-            
-            # Debug prints
-            if batch_idx % 100 == 0:
-                print(f"\nBatch {batch_idx}")
-                print(f"Predictions mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
-                print(f"Targets mean: {targets.mean():.4f}, std: {targets.std():.4f}")
-                print(f"Loss: {loss.item():.4f}")
+                # Compute loss
+                loss = je_loss(predictions[:, 1:], targets[:, 1:])
 
+            # Backward pass
             loss.backward()
             
             # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.predictor.parameters(), 1.0)
             
             optimizer.step()
             
-            # EMA update for target encoder
+            # Update target network with momentum
             model.update_target_encoder()
 
             total_loss += loss.item()
+
+            if batch_idx % 100 == 0:
+                print(f"\nBatch {batch_idx}")
+                print(f"Loss: {loss.item():.4f}")
+                # Monitor embedding norms
+                with torch.no_grad():
+                    pred_norm = predictions.norm(dim=-1).mean().item()
+                    target_norm = targets.norm(dim=-1).mean().item()
+                    print(f"Pred norm: {pred_norm:.4f}, Target norm: {target_norm:.4f}")
 
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
