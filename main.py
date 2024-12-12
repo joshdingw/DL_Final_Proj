@@ -72,77 +72,90 @@ def evaluate_model(device, model, probe_train_ds, probe_val_ds):
         print(f"{probe_attr} loss: {loss}")
 
 def je_loss(predictions, targets):
-    # Normalize both predictions and targets to unit sphere
+    # Normalize embeddings to unit sphere
     predictions = F.normalize(predictions, dim=-1, p=2)
     targets = F.normalize(targets, dim=-1, p=2)
     
-    # BYOL uses negative cosine similarity
-    loss = 2 - 2 * (predictions * targets).sum(dim=-1).mean()
-    return loss
+    # BYOL loss: negative cosine similarity
+    # Scale up the loss to prevent extremely small values
+    loss = (2 - 2 * (predictions * targets).sum(dim=-1)).mean()
+    
+    # Add L2 regularization to prevent collapse
+    l2_loss = 0.01 * (predictions.pow(2).sum(dim=-1).mean() + targets.pow(2).sum(dim=-1).mean())
+    
+    return loss + l2_loss
 
 def train_model(device):
     train_loader = create_wall_dataloader(
-        data_path="/scratch/DL24FA/train",  # Only use training data
+        data_path="/scratch/DL24FA/train",
         probing=False,
         device=device,
         train=True,
     )
 
-    model = JEPAModel(device=device)
+    model = JEPAModel(device=device, momentum=0.99)  # Start with slightly lower momentum
     model.to(device)
 
-    optimizer = torch.optim.Adam(
-        list(model.encoder.parameters()) + list(model.predictor.parameters()),
-        lr=3e-4  # Slightly lower learning rate
-    )
+    # Separate optimizers for encoder and predictor with different learning rates
+    encoder_optimizer = torch.optim.Adam(model.encoder.parameters(), lr=3e-4)
+    predictor_optimizer = torch.optim.Adam(model.predictor.parameters(), lr=1e-3)
 
-    num_epochs = 10  # Increase epochs since we're only using training data
+    num_epochs = 20  # Increase epochs
+    
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch+1}")):
-            states = batch.states  # [B, T, C, H, W]
-            actions = batch.actions  # [B, T-1, action_dim]
+            states = batch.states
+            actions = batch.actions
 
-            optimizer.zero_grad()
+            encoder_optimizer.zero_grad()
+            predictor_optimizer.zero_grad()
 
-            # Get online predictions
-            predictions = model(states, actions)  # [B, T, D]
-
-            # Compute target representations using the momentum encoder
+            # Forward pass
+            predictions = model(states, actions)
+            
+            # Get target representations
             with torch.no_grad():
                 targets = model.target_encoder(
                     states.view(-1, *states.shape[2:])
-                ).view(states.size(0), states.size(1), -1)  # [B, T, D]
-                
-                # Stop gradient and detach
-                targets = targets.detach()
+                ).view(states.size(0), states.size(1), -1)
 
-            # Only compute loss for predicted future states
+            # Compute loss only on predicted futures
             loss = je_loss(predictions[:, 1:], targets[:, 1:])
 
-            if loss.item() < 1e-5:  # Add loss sanity check
-                print(f"Warning: Very low loss value detected: {loss.item()}")
-                continue
-
+            # Stability check with reasonable threshold
+            if loss.item() < 0.1:  
+                print(f"Warning: Low loss value detected: {loss.item()}")
+                # But continue training - don't skip batch
+            
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Add gradient clipping
-            optimizer.step()
 
-            # Update target encoder with higher momentum for stability
-            model.momentum = min(1 - 0.003, model.momentum + 0.005)  # Gradually increase momentum
+            # Gradient clipping per optimizer
+            torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.predictor.parameters(), 1.0)
+            
+            encoder_optimizer.step()
+            predictor_optimizer.step()
+
+            # Exponential moving average update of target encoder
             model.update_target_encoder()
 
             total_loss += loss.item()
 
             if batch_idx % 100 == 0:
                 print(f"Batch {batch_idx}, Loss: {loss.item():.4f}")
+                print(f"Average pred norm: {predictions.norm(dim=-1).mean():.4f}")
+                print(f"Average target norm: {targets.norm(dim=-1).mean():.4f}")
 
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Average Loss: {avg_loss:.4f}")
+
+        # Gradually increase momentum as training progresses
+        if epoch > 0 and epoch % 5 == 0:
+            model.momentum = min(0.999, model.momentum + 0.001)
 
     torch.save(model.state_dict(), 'jepa_model.pth')
-
 
 def evaluate_current_model(model, device):
     probe_train_ds, probe_val_ds = load_data(device)
