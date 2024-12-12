@@ -76,14 +76,16 @@ def je_loss(predictions, targets):
     predictions = F.normalize(predictions, dim=-1, p=2)
     targets = F.normalize(targets, dim=-1, p=2)
     
-    # BYOL loss: negative cosine similarity
-    # Scale up the loss to prevent extremely small values
-    loss = (2 - 2 * (predictions * targets).sum(dim=-1)).mean()
+    # Stronger loss scaling and better regularization
+    cos_sim = (predictions * targets).sum(dim=-1)
+    loss = (1 - cos_sim).mean()  # Range [0, 2]
     
-    # Add L2 regularization to prevent collapse
-    l2_loss = 0.01 * (predictions.pow(2).sum(dim=-1).mean() + targets.pow(2).sum(dim=-1).mean())
+    # Add diversity loss to prevent collapse
+    batch_cos_sim = torch.matmul(predictions, predictions.transpose(-2, -1))
+    identity = torch.eye(batch_cos_sim.shape[-1], device=predictions.device)
+    diversity_loss = (batch_cos_sim - identity).pow(2).mean()
     
-    return loss + l2_loss
+    return loss + 0.1 * diversity_loss
 
 def train_model(device):
     train_loader = create_wall_dataloader(
@@ -93,79 +95,77 @@ def train_model(device):
         train=True,
     )
 
-    model = JEPAModel(device=device, momentum=0.99)  # Start with slightly lower momentum
+    model = JEPAModel(device=device, momentum=0.996)  # Higher initial momentum
     model.to(device)
 
-    # Separate optimizers for encoder and predictor with different learning rates
-    encoder_optimizer = torch.optim.Adam(model.encoder.parameters(), lr=3e-4)
-    predictor_optimizer = torch.optim.Adam(model.predictor.parameters(), lr=1e-3)
-
-    num_epochs = 20  # Increase epochs
+    optimizer = torch.optim.AdamW(  # Switch to AdamW
+        list(model.encoder.parameters()) + list(model.predictor.parameters()),
+        lr=1e-3,
+        weight_decay=0.01  # Stronger weight decay
+    )
     
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=10 * len(train_loader)
+    )
+
+    num_epochs = 10
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
+        
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch+1}")):
             states = batch.states
             actions = batch.actions
 
-            encoder_optimizer.zero_grad()
-            predictor_optimizer.zero_grad()
+            optimizer.zero_grad()
 
-            # Forward pass
+            # Get predictions and targets
             predictions = model(states, actions)
-            
-            # Get target representations
             with torch.no_grad():
                 targets = model.target_encoder(
                     states.view(-1, *states.shape[2:])
                 ).view(states.size(0), states.size(1), -1)
+                targets = targets.detach()
 
-            # Compute loss only on predicted futures
+            # Compute loss only on future predictions
             loss = je_loss(predictions[:, 1:], targets[:, 1:])
-
-            # Stability check with reasonable threshold
-            if loss.item() < 0.1:  
-                print(f"Warning: Low loss value detected: {loss.item()}")
-                # But continue training - don't skip batch
             
+            # Skip problematic batches
+            if not torch.isfinite(loss) or loss.item() < 0.1:
+                print(f"Skipping batch with loss {loss.item()}")
+                continue
+
             loss.backward()
-
-            # Gradient clipping per optimizer
-            torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(model.predictor.parameters(), 1.0)
             
-            encoder_optimizer.step()
-            predictor_optimizer.step()
-
-            # Exponential moving average update of target encoder
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            optimizer.step()
+            scheduler.step()
+            
+            # Update target network
             model.update_target_encoder()
 
             total_loss += loss.item()
 
             if batch_idx % 100 == 0:
                 print(f"Batch {batch_idx}, Loss: {loss.item():.4f}")
-                print(f"Average pred norm: {predictions.norm(dim=-1).mean():.4f}")
-                print(f"Average target norm: {targets.norm(dim=-1).mean():.4f}")
+                print(f"Learning rate: {scheduler.get_last_lr()[0]:.6f}")
 
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Average Loss: {avg_loss:.4f}")
-
-        # Gradually increase momentum as training progresses
-        if epoch > 0 and epoch % 5 == 0:
-            model.momentum = min(0.999, model.momentum + 0.001)
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
     torch.save(model.state_dict(), 'jepa_model.pth')
 
-def evaluate_current_model(model, device):
-    probe_train_ds, probe_val_ds = load_data(device)
-    evaluator = ProbingEvaluator(
-        device=device,
-        model=model,
-        probe_train_ds=probe_train_ds,
-        probe_val_ds=probe_val_ds,
-        quick_debug=False,
-    )
+# def evaluate_current_model(model, device):
+#     probe_train_ds, probe_val_ds = load_data(device)
+#     evaluator = ProbingEvaluator(
+#         device=device,
+#         model=model,
+#         probe_train_ds=probe_train_ds,
+#         probe_val_ds=probe_val_ds,
+#         quick_debug=False,
+#     )
 
     prober = evaluator.train_pred_prober()
     avg_losses = evaluator.evaluate_all(prober=prober)
