@@ -79,13 +79,12 @@ def je_loss(predictions, targets):
     loss = 1 - F.cosine_similarity(predictions, targets, dim=-1).mean()
     return loss
 
-def byol_loss(pred, target):
-    # pred: [B,T,D]
-    # target: [B,T,D]
-    # 使用BYOL推荐的L2 loss或者cosine similarity loss
-    pred_norm = F.normalize(pred, dim=-1)
-    target_norm = F.normalize(target, dim=-1)
-    return 2 - 2 * (pred_norm * target_norm).sum(dim=-1).mean()
+# Online encoder predictor of target projection
+def projection_loss(online, target):
+    norm_inner_prod = torch.inner(online, target) / (torch.linalg.norm(online) * torch.linalg.norm(target))
+    loss = 2 - (2 * norm_inner_prod)
+    return loss
+
 def train_model(device):
     # Load training data
     train_loader = create_wall_dataloader(
@@ -112,28 +111,40 @@ def train_model(device):
             actions = batch.actions  # [B, T-1, action_dim]
 
             optimizer.zero_grad()
-            predictions = model(states, actions)  # [B, T, D]
+            predictions, online_preds, targets = model(states, actions)  # [B, T, D]
 
-            # 使用target encoder计算目标表征
+            # Compute target representations using the target encoder
             with torch.no_grad():
-                targets = model.get_target_representations(states)  # [B, T, D]
+                targets = model.target_encoder(
+                    states.view(-1, *states.shape[2:])
+                ).view(states.size(0), states.size(1), -1)  # [B, T, D]
 
-            # 计算BYOL损失，只对从t=1开始的时间步进行对齐避免初始态干扰
-            loss = byol_loss(predictions[:, 1:], targets[:, 1:])
+            # Compute loss between predictions[:, 1:] and targets[:, 1:]
+            loss = je_loss(predictions[:, 1:], targets[:, 1:]) + projection_loss(online_preds, targets)
+
+            #print(f"Predictions mean: {predictions.mean().item():.8e}, std: {predictions.std().item():.8e}")
+            #print(f"Targets mean: {targets.mean().item():.8e}, std: {targets.std().item():.8e}")
             loss.backward()
             optimizer.step()
 
-            # EMA更新target encoder
-            model._update_target_encoder(model.momentum)
+            # Update target encoder
+            model.update_target_encoder()
 
             total_loss += loss.item()
-            if batch_idx % 100 == 0:
-                print(f"Batch {batch_idx}, Loss: {loss.item():.8e}")
+
+
+            #print(f"Batch {batch_idx}, Loss: {loss.item():.8e}")
 
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.8e}")
 
+        # Optionally evaluate the model
+        if (epoch + 1) % 2 == 0:
+            evaluate_current_model(model, device)
+
+    # Save the trained model
     torch.save(model.state_dict(), 'jepa_model.pth')
+
 
 def evaluate_current_model(model, device):
     probe_train_ds, probe_val_ds = load_data(device)
