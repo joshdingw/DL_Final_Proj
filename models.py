@@ -112,7 +112,7 @@ class Predictor(nn.Module):
         return self.mlp(x)
 
 class JEPAModel(nn.Module):
-    def __init__(self, device="cuda", repr_dim=256, action_dim=2, momentum=0.999):
+    def __init__(self, device="cuda", repr_dim=256, action_dim=2, momentum=0.996):
         super().__init__()
         self.device = device
         self.repr_dim = repr_dim
