@@ -138,9 +138,9 @@ def train_model(device):
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.8e}")
 
-        # Optionally evaluate the model
-        if (epoch + 1) % 2 == 0:
-            evaluate_current_model(model, device)
+        # # Optionally evaluate the model
+        # if (epoch + 1) % 2 == 0:
+        #     evaluate_current_model(model, device)
 
     # Save the trained model
     torch.save(model.state_dict(), 'jepa_model.pth')
