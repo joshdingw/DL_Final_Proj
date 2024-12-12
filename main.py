@@ -76,21 +76,35 @@ def je_loss(predictions, targets):
     predictions = F.normalize(predictions, dim=-1, p=2)
     targets = F.normalize(targets, dim=-1, p=2)
     
-    # Compute similarity
-    similarity = (predictions * targets).sum(dim=-1)
+    # Reshape predictions and targets to 2D
+    batch_size = predictions.size(0)
+    seq_len = predictions.size(1)
+    feat_dim = predictions.size(2)
+    
+    predictions = predictions.view(-1, feat_dim)  # [B*T, D]
+    targets = targets.view(-1, feat_dim)  # [B*T, D]
+    
+    # Compute positive similarity
+    similarity = (predictions * targets).sum(dim=-1)  # [B*T]
     
     # InfoNCE-style loss with temperature
     temperature = 0.5
-    exp_sim = torch.exp(similarity / temperature)
+    exp_sim = torch.exp(similarity / temperature)  # [B*T]
     
-    # Compute cross-batch negatives
-    batch_size = predictions.size(0)
-    neg_sim = torch.matmul(predictions.view(batch_size, -1), 
-                          targets.view(batch_size, -1).t())
-    neg_exp_sim = torch.exp(neg_sim / temperature).sum(dim=1)
+    # Compute all pairs of similarities
+    all_sims = torch.matmul(predictions, targets.t())  # [B*T, B*T]
+    exp_all_sims = torch.exp(all_sims / temperature)  # [B*T, B*T]
+    
+    # Remove diagonal (positive) similarities from denominator
+    mask = torch.eye(exp_all_sims.size(0), device=exp_all_sims.device)
+    exp_all_sims = exp_all_sims * (1 - mask)
+    
+    # Sum over negatives
+    neg_exp_sim = exp_all_sims.sum(dim=1)  # [B*T]
     
     # Final loss
     loss = -torch.log(exp_sim / (exp_sim + neg_exp_sim + 1e-6)).mean()
+    
     return loss
 
 def train_model(device):
@@ -112,10 +126,9 @@ def train_model(device):
     
     warmup_steps = 1000
     total_steps = 10 * len(train_loader)
-    
-    num_epochs = 10
     step = 0
     
+    num_epochs = 10
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
