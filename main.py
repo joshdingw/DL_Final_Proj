@@ -76,34 +76,9 @@ def je_loss(predictions, targets):
     predictions = F.normalize(predictions, dim=-1, p=2)
     targets = F.normalize(targets, dim=-1, p=2)
     
-    # Reshape predictions and targets to 2D
-    batch_size = predictions.size(0)
-    seq_len = predictions.size(1)
-    feat_dim = predictions.size(2)
-    
-    predictions = predictions.view(-1, feat_dim)  # [B*T, D]
-    targets = targets.view(-1, feat_dim)  # [B*T, D]
-    
-    # Compute positive similarity
-    similarity = (predictions * targets).sum(dim=-1)  # [B*T]
-    
-    # InfoNCE-style loss with temperature
-    temperature = 0.5
-    exp_sim = torch.exp(similarity / temperature)  # [B*T]
-    
-    # Compute all pairs of similarities
-    all_sims = torch.matmul(predictions, targets.t())  # [B*T, B*T]
-    exp_all_sims = torch.exp(all_sims / temperature)  # [B*T, B*T]
-    
-    # Remove diagonal (positive) similarities from denominator
-    mask = torch.eye(exp_all_sims.size(0), device=exp_all_sims.device)
-    exp_all_sims = exp_all_sims * (1 - mask)
-    
-    # Sum over negatives
-    neg_exp_sim = exp_all_sims.sum(dim=1)  # [B*T]
-    
-    # Final loss
-    loss = -torch.log(exp_sim / (exp_sim + neg_exp_sim + 1e-6)).mean()
+    # Simple cosine similarity loss to start
+    cos_sim = (predictions * targets).sum(dim=-1)
+    loss = (1 - cos_sim).mean()
     
     return loss
 
@@ -118,15 +93,12 @@ def train_model(device):
     model = JEPAModel(device=device, momentum=0.99)
     model.to(device)
 
+    # Fixed learning rate without warmup
     optimizer = torch.optim.AdamW(
         list(model.encoder.parameters()) + list(model.predictor.parameters()),
-        lr=5e-4,
-        weight_decay=0.05
+        lr=1e-4,  # Start with small learning rate
+        weight_decay=0.01
     )
-    
-    warmup_steps = 1000
-    total_steps = 10 * len(train_loader)
-    step = 0
     
     num_epochs = 10
     for epoch in range(num_epochs):
@@ -136,12 +108,6 @@ def train_model(device):
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch+1}")):
             states = batch.states
             actions = batch.actions
-
-            # Warmup learning rate
-            if step < warmup_steps:
-                lr = optimizer.param_groups[0]['lr'] * step / warmup_steps
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr
             
             optimizer.zero_grad()
 
@@ -154,11 +120,18 @@ def train_model(device):
 
             # Only predict future states
             loss = je_loss(predictions[:, 1:], targets[:, 1:])
+            
+            # Debug prints
+            if batch_idx % 100 == 0:
+                print(f"\nBatch {batch_idx}")
+                print(f"Predictions mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
+                print(f"Targets mean: {targets.mean():.4f}, std: {targets.std():.4f}")
+                print(f"Loss: {loss.item():.4f}")
 
             loss.backward()
             
             # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             
             optimizer.step()
             
@@ -166,21 +139,11 @@ def train_model(device):
             model.update_target_encoder()
 
             total_loss += loss.item()
-            step += 1
-
-            if batch_idx % 100 == 0:
-                print(f"Batch {batch_idx}, Loss: {loss.item():.4f}")
-                print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
     torch.save(model.state_dict(), 'jepa_model.pth')
-
-    prober = evaluator.train_pred_prober()
-    avg_losses = evaluator.evaluate_all(prober=prober)
-    for probe_attr, loss in avg_losses.items():
-        print(f"{probe_attr} loss: {loss}")
 
 
 if __name__ == "__main__":
