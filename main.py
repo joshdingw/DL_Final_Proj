@@ -3,7 +3,7 @@ from evaluator import ProbingEvaluator
 import torch
 from models import MockModel
 import glob
-
+from models import JEPA
 
 def get_device():
     """Check for GPU availability."""
